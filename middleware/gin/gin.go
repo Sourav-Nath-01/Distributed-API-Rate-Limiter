@@ -1,0 +1,139 @@
+// Package gin provides distributed rate limiting for Gin applications.
+package gin
+
+import (
+	"fmt"
+	"net/http"
+
+	ratelimit "github.com/Sourav-Nath-01/Distributed-API-Rate-Limiter"
+	common "github.com/Sourav-Nath-01/Distributed-API-Rate-Limiter/middleware"
+	ginframework "github.com/gin-gonic/gin"
+)
+
+// KeyFunc derives a rate-limit identity from a Gin request.
+type KeyFunc func(*ginframework.Context) (string, error)
+
+// PolicyFunc selects a rate-limit policy for a Gin request.
+type PolicyFunc func(*ginframework.Context) (ratelimit.Policy, error)
+
+// Options configures Gin rate-limit middleware.
+type Options struct {
+	Policy       ratelimit.Policy
+	PolicyFor    PolicyFunc
+	Key          KeyFunc
+	FailureMode  common.FailureMode
+	Enforcement  common.EnforcementMode
+	Skip         func(*ginframework.Context) bool
+	Observe      func(ratelimit.Decision, error)
+	Denied       func(*ginframework.Context, ratelimit.Decision)
+	LimiterError func(*ginframework.Context, error)
+}
+
+// New constructs Gin middleware around limiter.
+func New(limiter ratelimit.Limiter, options Options) (ginframework.HandlerFunc, error) {
+	if limiter == nil {
+		return nil, fmt.Errorf("limiter must not be nil")
+	}
+	if options.PolicyFor == nil {
+		if err := options.Policy.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if options.FailureMode != common.FailClosed && options.FailureMode != common.FailOpen {
+		return nil, fmt.Errorf("unsupported failure mode %d", options.FailureMode)
+	}
+	if options.Enforcement != common.Enforce && options.Enforcement != common.ReportOnly {
+		return nil, fmt.Errorf("unsupported enforcement mode %d", options.Enforcement)
+	}
+	if options.Key == nil {
+		options.Key = func(context *ginframework.Context) (string, error) {
+			return common.RemoteIPKey(context.Request)
+		}
+	}
+	if options.Denied == nil {
+		options.Denied = defaultDenied
+	}
+	if options.LimiterError == nil {
+		options.LimiterError = defaultLimiterError
+	}
+
+	return func(context *ginframework.Context) {
+		if options.Skip != nil && options.Skip(context) {
+			context.Next()
+			return
+		}
+
+		policy := options.Policy
+		if options.PolicyFor != nil {
+			var err error
+			policy, err = options.PolicyFor(context)
+			if err == nil {
+				err = policy.Validate()
+			}
+			if err != nil {
+				observe(options.Observe, ratelimit.Decision{}, err)
+				if options.FailureMode == common.FailOpen {
+					context.Next()
+					return
+				}
+				options.LimiterError(context, err)
+				return
+			}
+		}
+
+		key, err := options.Key(context)
+		if err != nil {
+			observe(options.Observe, ratelimit.Decision{}, err)
+			if options.FailureMode == common.FailOpen {
+				context.Next()
+				return
+			}
+			options.LimiterError(context, err)
+			return
+		}
+
+		decision, err := limiter.Allow(context.Request.Context(), key, policy)
+		observe(options.Observe, decision, err)
+		if err != nil {
+			if options.FailureMode == common.FailOpen {
+				context.Next()
+				return
+			}
+			options.LimiterError(context, err)
+			return
+		}
+
+		context.Request = context.Request.WithContext(common.ContextWithResult(
+			context.Request.Context(),
+			common.Result{Policy: policy, Decision: decision},
+		))
+		if options.Enforcement == common.ReportOnly {
+			common.ApplyReportOnlyHeaders(context.Writer.Header(), decision)
+		} else {
+			common.ApplyHeaders(context.Writer.Header(), decision)
+		}
+		if !decision.Allowed && options.Enforcement == common.Enforce {
+			options.Denied(context, decision)
+			return
+		}
+		context.Next()
+	}, nil
+}
+
+func observe(observer func(ratelimit.Decision, error), decision ratelimit.Decision, err error) {
+	if observer != nil {
+		observer(decision, err)
+	}
+}
+
+func defaultDenied(context *ginframework.Context, _ ratelimit.Decision) {
+	context.AbortWithStatusJSON(http.StatusTooManyRequests, ginframework.H{
+		"error": "rate limit exceeded",
+	})
+}
+
+func defaultLimiterError(context *ginframework.Context, _ error) {
+	context.AbortWithStatusJSON(http.StatusServiceUnavailable, ginframework.H{
+		"error": "rate limiter unavailable",
+	})
+}
