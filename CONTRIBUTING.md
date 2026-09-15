@@ -11,7 +11,7 @@ Thanks for helping improve Distributed API Rate Limiter.
 
 ## Development setup
 
-You need Go 1.25.11 or later and Redis.
+You need Go 1.25.13 or later and Redis.
 
 ```bash
 git clone https://github.com/Sourav-Nath-01/Distributed-API-Rate-Limiter.git

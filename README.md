@@ -54,7 +54,7 @@ curl http://localhost:8080/readyz
 
 ## Installation
 
-You need Go 1.25.11 or later and a reachable Redis server.
+You need Go 1.25.13 or later and a reachable Redis server.
 
 ```bash
 go get github.com/Sourav-Nath-01/Distributed-API-Rate-Limiter@latest
